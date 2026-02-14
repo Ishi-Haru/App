@@ -1,0 +1,35 @@
+:root {
+  font-family: "Aptos", "Bahnschrift", "Segoe UI", sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #102a43;
+  background-color: #f4efe6;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-image:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.7), transparent 55%),
+    radial-gradient(circle at 20% 20%, rgba(255, 228, 196, 0.6), transparent 45%),
+    linear-gradient(120deg, #f4efe6, #ecf3f7 60%, #e3f2ff);
+  background-attachment: fixed;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+button,
+input,
+select {
+  font-family: inherit;
+}
