@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
   getDocs,
   orderBy,
@@ -10,8 +11,10 @@ import {
   updateDoc,
   where,
 } from 'firebase/firestore'
+import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth'
+import type { User } from 'firebase/auth'
 import './App.css'
-import { db } from './lib/firebase'
+import { auth, db, googleProvider } from './lib/firebase'
 
 type TaskState = 'inbox' | 'today' | 'active' | 'done'
 
@@ -48,68 +51,7 @@ const stateLabels: Record<TaskState, string> = {
 
 const taskStates: TaskState[] = ['inbox', 'today', 'active', 'done']
 
-const todayString = () => new Date().toISOString().slice(0, 10)
 const nowIso = () => new Date().toISOString()
-
-const seedProjects: Project[] = [
-  { id: 'p-home', name: 'Home', state: 'active', order: 10, createdAt: nowIso() },
-  { id: 'p-work', name: 'Work', state: 'active', order: 20, createdAt: nowIso() },
-]
-
-const seedTasks: Task[] = [
-  {
-    id: 't-1',
-    text: 'Collect ideas for weekly review',
-    projectId: null,
-    parentId: null,
-    state: 'inbox',
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-    dueAt: null,
-    scheduledAt: null,
-    doneAt: null,
-    order: 10,
-  },
-  {
-    id: 't-2',
-    text: 'Plan meal prep for Friday',
-    projectId: 'p-home',
-    parentId: null,
-    state: 'active',
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-    dueAt: null,
-    scheduledAt: todayString(),
-    doneAt: null,
-    order: 20,
-  },
-  {
-    id: 't-3',
-    text: 'Draft Q2 roadmap outline',
-    projectId: 'p-work',
-    parentId: null,
-    state: 'active',
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-    dueAt: null,
-    scheduledAt: todayString(),
-    doneAt: null,
-    order: 10,
-  },
-  {
-    id: 't-4',
-    text: 'Gather research notes',
-    projectId: 'p-work',
-    parentId: 't-3',
-    state: 'active',
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-    dueAt: null,
-    scheduledAt: null,
-    doneAt: null,
-    order: 10,
-  },
-]
 
 const toIsoString = (value: unknown) => {
   if (!value) {
@@ -152,6 +94,8 @@ const mapProjectDoc = (id: string, data: Partial<Project>) => {
 }
 
 function App() {
+  const [user, setUser] = useState<User | null>(null)
+  const [loading, setLoading] = useState(true)
   const [projects, setProjects] = useState<Project[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [view, setView] = useState<ViewMode>('inbox')
@@ -162,38 +106,96 @@ function App() {
   const [quickText, setQuickText] = useState('')
   const [newProjectName, setNewProjectName] = useState('')
   const [showNewProjectForm, setShowNewProjectForm] = useState(false)
+  const [defaultProjectId, setDefaultProjectId] = useState<string | null>(null)
 
   useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser)
+      setLoading(false)
+    })
+    return () => unsubscribe()
+  }, [])
+
+  useEffect(() => {
+    if (!user) {
+      setProjects([])
+      setTasks([])
+      setDefaultProjectId(null)
+      return
+    }
+
     let active = true
     const loadData = async () => {
-      const projectQuery = query(collection(db, 'projects'), orderBy('order'))
-      const taskQuery = query(
-        collection(db, 'tasks'),
-        where('state', 'in', taskStates),
-        orderBy('order'),
-      )
-      const [projectSnap, taskSnap] = await Promise.all([
-        getDocs(projectQuery),
-        getDocs(taskQuery),
-      ])
-      if (!active) {
-        return
+      try {
+        const projectQuery = query(
+          collection(db, 'projects'),
+          where('userId', '==', user.uid),
+          orderBy('order')
+        )
+        const taskQuery = query(
+          collection(db, 'tasks'),
+          where('userId', '==', user.uid),
+          where('state', 'in', taskStates),
+          orderBy('order'),
+        )
+        const [projectSnap, taskSnap] = await Promise.all([
+          getDocs(projectQuery),
+          getDocs(taskQuery),
+        ])
+        if (!active) {
+          return
+        }
+        const nextProjects = projectSnap.docs.map((docSnap) =>
+          mapProjectDoc(docSnap.id, docSnap.data()),
+        )
+        const nextTasks = taskSnap.docs.map((docSnap) =>
+          mapTaskDoc(docSnap.id, docSnap.data()),
+        )
+        
+        // Ensure default project exists
+        let defaultProj = nextProjects.find((p) => p.name === 'Default')
+        if (!defaultProj) {
+          console.log('Creating default project...')
+          try {
+            const docRef = await addDoc(collection(db, 'projects'), {
+              name: 'Default',
+              state: 'active',
+              userId: user.uid,
+              order: 0,
+              createdAt: serverTimestamp(),
+            })
+            defaultProj = {
+              id: docRef.id,
+              name: 'Default',
+              state: 'active' as const,
+              order: 0,
+              createdAt: nowIso(),
+            }
+            nextProjects.unshift(defaultProj)
+            console.log('Default project created:', docRef.id)
+          } catch (err) {
+            console.error('Error creating default project:', err)
+            alert('Failed to create default project. Please check security rules.')
+            return
+          }
+        }
+        
+        if (defaultProj) {
+          setDefaultProjectId(defaultProj.id)
+        }
+        setProjects(nextProjects)
+        setTasks(nextTasks)
+      } catch (error) {
+        console.error('Error loading data:', error)
+        alert('Error loading data. Check console for details.')
       }
-      const nextProjects = projectSnap.docs.map((docSnap) =>
-        mapProjectDoc(docSnap.id, docSnap.data()),
-      )
-      const nextTasks = taskSnap.docs.map((docSnap) =>
-        mapTaskDoc(docSnap.id, docSnap.data()),
-      )
-      setProjects(nextProjects.length ? nextProjects : seedProjects)
-      setTasks(nextTasks.length ? nextTasks : seedTasks)
     }
 
     loadData()
     return () => {
       active = false
     }
-  }, [])
+  }, [user])
 
   useEffect(() => {
     if (!selectedProjectId && projects.length) {
@@ -226,8 +228,24 @@ function App() {
       .sort((a, b) => a.order - b.order)
   }, [tasks, selectedProjectId])
 
+  const handleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider)
+    } catch (error) {
+      console.error('Login error:', error)
+    }
+  }
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth)
+    } catch (error) {
+      console.error('Logout error:', error)
+    }
+  }
 
   const addQuickTask = async () => {
+    if (!user || !defaultProjectId) return
     const trimmed = quickText.trim()
     if (!trimmed) {
       return
@@ -238,9 +256,10 @@ function App() {
     const nextOrder = (rootOrders.length ? Math.max(...rootOrders) : 0) + 10
     const taskData = {
       text: trimmed,
-      projectId: 'p-default',
+      projectId: defaultProjectId,
       parentId: null,
       state: 'inbox' as TaskState,
+      userId: user.uid,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
       dueAt: null,
@@ -354,6 +373,84 @@ function App() {
     await updateDoc(doc(db, 'tasks', id), updates)
   }
 
+  const deleteTask = async (id: string) => {
+    const descendants = getDescendantTasks(id, tasks)
+    
+    if (descendants.length > 0) {
+      const confirmed = window.confirm(
+        `This task has ${descendants.length} subtask(s). ` +
+        `Deleting this task will also delete all subtasks. Continue?`
+      )
+      if (!confirmed) {
+        return
+      }
+    }
+
+    // Delete all descendants and the task itself
+    const allToDelete = [id, ...descendants.map((t) => t.id)]
+    
+    setTasks((prev) => prev.filter((task) => !allToDelete.includes(task.id)))
+
+    // Delete from Firestore
+    await Promise.all(
+      allToDelete.map((taskId) =>
+        deleteDoc(doc(db, 'tasks', taskId))
+      )
+    )
+  }
+
+  const deleteProject = async (projectId: string) => {
+    if (projectId === defaultProjectId) {
+      alert('Cannot delete the default project.')
+      return
+    }
+
+    const projectTasks = tasks.filter((t) => t.projectId === projectId)
+    
+    if (projectTasks.length > 0) {
+      const confirmed = window.confirm(
+        `This project has ${projectTasks.length} task(s). ` +
+        `Deleting this project will also delete all tasks. Continue?`
+      )
+      if (!confirmed) {
+        return
+      }
+    }
+
+    // Delete all project tasks
+    setTasks((prev) => prev.filter((task) => task.projectId !== projectId))
+    setProjects((prev) => prev.filter((p) => p.id !== projectId))
+
+    // Delete from Firestore
+    await Promise.all([
+      deleteDoc(doc(db, 'projects', projectId)),
+      ...projectTasks.map((task) => deleteDoc(doc(db, 'tasks', task.id)))
+    ])
+
+    // Navigate back to project list
+    setProjectListView(true)
+  }
+
+  const exportData = () => {
+    const data = {
+      projects: projects,
+      tasks: tasks,
+      exportedAt: new Date().toISOString(),
+    }
+    
+    const dataStr = JSON.stringify(data, null, 2)
+    const dataBlob = new Blob([dataStr], { type: 'application/json' })
+    const url = URL.createObjectURL(dataBlob)
+    
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `todo-backup-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }
+
   const renderTaskRow = (task: Task) => {
     // Get potential parent tasks: same project, not self, not inbox state
     const potentialParents = tasks.filter(
@@ -372,64 +469,71 @@ function App() {
           </span>
         </div>
         <div className="task-meta">
-          <label className="field">
-            State
-            <select
-              value={task.state}
-              onChange={(event) =>
-                updateTask(task.id, { state: event.target.value as TaskState })
-              }
+          {/* 1行目: Project, Parent Task */}
+          <div className="task-meta-row">
+            <label className="field">
+              Project
+              <select
+                value={task.projectId ?? defaultProjectId ?? ''}
+                onChange={(event) =>
+                  updateTask(task.id, {
+                    projectId: event.target.value,
+                  })
+                }
+              >
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              Parent Task
+              <select
+                value={task.parentId ?? ''}
+                onChange={(event) =>
+                  updateTask(task.id, {
+                    parentId: event.target.value || null,
+                  })
+                }
+              >
+                <option value="">No parent</option>
+                {potentialParents.map((parent) => (
+                  <option key={parent.id} value={parent.id}>
+                    {parent.text}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {/* 2行目: Active, Today, Done, Delete buttons */}
+          <div className="task-meta-row">
+            <button
+              className="btn-primary"
+              onClick={() => updateTask(task.id, { state: 'active' })}
             >
-              {taskStates.map((state) => (
-                <option key={state} value={state}>
-                  {stateLabels[state]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            Project
-            <select
-              value={task.projectId ?? 'p-default'}
-              onChange={(event) =>
-                updateTask(task.id, {
-                  projectId: event.target.value,
-                })
-              }
-            >
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            Parent Task
-            <select
-              value={task.parentId ?? ''}
-              onChange={(event) =>
-                updateTask(task.id, {
-                  parentId: event.target.value || null,
-                })
-              }
-            >
-              <option value="">No parent</option>
-              {potentialParents.map((parent) => (
-                <option key={parent.id} value={parent.id}>
-                  {parent.text}
-                </option>
-              ))}
-            </select>
-          </label>
-          {task.state !== 'today' && (
+              ▶️ Active
+            </button>
             <button
               className="btn-today"
               onClick={() => updateTask(task.id, { state: 'today' })}
             >
-              ⭐ Add to Today
+              ⭐ Today
             </button>
-          )}
+            <button
+              className="btn-done"
+              onClick={() => updateTask(task.id, { state: 'done' })}
+            >
+              ✓ Done
+            </button>
+            <button
+              className="btn-delete"
+              onClick={() => deleteTask(task.id)}
+            >
+              🗑️ Delete
+            </button>
+          </div>
         </div>
       </div>
     )
@@ -449,6 +553,14 @@ function App() {
             <div className="tree-row">
               <span className="tree-text">{task.text}</span>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                {task.state === 'today' && (
+                  <button
+                    className="btn-primary-small"
+                    onClick={() => updateTask(task.id, { state: 'active' })}
+                  >
+                    ▶️
+                  </button>
+                )}
                 {task.state !== 'done' && (
                   <button
                     className="btn-done-small"
@@ -457,21 +569,12 @@ function App() {
                     ✓
                   </button>
                 )}
-                <select
-                  className="tree-select"
-                  value={task.state}
-                  onChange={(event) =>
-                    updateTask(task.id, {
-                      state: event.target.value as TaskState,
-                    })
-                  }
+                <button
+                  className="btn-delete-small"
+                  onClick={() => deleteTask(task.id)}
                 >
-                  {taskStates.map((state) => (
-                    <option key={state} value={state}>
-                      {stateLabels[state]}
-                    </option>
-                  ))}
-                </select>
+                  🗑️
+                </button>
               </div>
             </div>
             {renderTodayTree(projectId, task.id, depth + 1)}
@@ -502,6 +605,14 @@ function App() {
                 <div className="tree-row">
                   <span className="tree-text">{task.text}</span>
                   <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    {task.state === 'today' && (
+                      <button
+                        className="btn-primary-small"
+                        onClick={() => updateTask(task.id, { state: 'active' })}
+                      >
+                        ▶️
+                      </button>
+                    )}
                     {task.state !== 'today' && (
                       <button
                         className="btn-today-small"
@@ -518,21 +629,12 @@ function App() {
                         ✓
                       </button>
                     )}
-                    <select
-                      className="tree-select"
-                      value={task.state}
-                      onChange={(event) =>
-                        updateTask(task.id, {
-                          state: event.target.value as TaskState,
-                        })
-                      }
+                    <button
+                      className="btn-delete-small"
+                      onClick={() => deleteTask(task.id)}
                     >
-                      {taskStates.map((state) => (
-                        <option key={state} value={state}>
-                          {stateLabels[state]}
-                        </option>
-                      ))}
-                    </select>
+                      🗑️
+                    </button>
                   </div>
                 </div>
                 {renderProjectTree(task.id, depth + 1)}
@@ -553,21 +655,12 @@ function App() {
                   <div className="tree-row tree-row-done">
                     <span className="tree-text">{task.text}</span>
                     <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                      <select
-                        className="tree-select"
-                        value={task.state}
-                        onChange={(event) =>
-                          updateTask(task.id, {
-                            state: event.target.value as TaskState,
-                          })
-                        }
+                      <button
+                        className="btn-delete-small"
+                        onClick={() => deleteTask(task.id)}
                       >
-                        {taskStates.map((state) => (
-                          <option key={state} value={state}>
-                            {stateLabels[state]}
-                          </option>
-                        ))}
-                      </select>
+                        🗑️
+                      </button>
                     </div>
                   </div>
                   {renderProjectTree(task.id, depth + 1)}
@@ -577,6 +670,32 @@ function App() {
           </>
         )}
       </>
+    )
+  }
+
+  if (loading) {
+    return (
+      <div className="app">
+        <div className="login-container">
+          <p>Loading...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!user) {
+    return (
+      <div className="app">
+        <div className="login-container">
+          <div className="login-card">
+            <h1>📋 Todo Canvas</h1>
+            <p className="login-subtitle">Focus, then sort later.</p>
+            <button className="btn-login" onClick={handleLogin}>
+              Sign in with Google
+            </button>
+          </div>
+        </div>
+      </div>
     )
   }
 
@@ -590,19 +709,33 @@ function App() {
             Capture quickly in Inbox, then organize by state and projects.
           </p>
         </div>
-        <div className="quick-add">
-          <input
-            type="text"
-            placeholder="Quick add to Inbox"
-            value={quickText}
-            onChange={(event) => setQuickText(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                addQuickTask()
-              }
-            }}
-          />
-          <button onClick={addQuickTask}>Add</button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', alignItems: 'flex-end' }}>
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+            <span style={{ fontSize: '0.9rem', color: '#52606d' }}>{user.email}</span>
+            <button className="btn-logout" onClick={handleLogout}>
+              Logout
+            </button>
+          </div>
+          <button
+            className="btn-export"
+            onClick={exportData}
+          >
+            📥 Export Data
+          </button>
+          <div className="quick-add">
+            <input
+              type="text"
+              placeholder="Quick add to Inbox"
+              value={quickText}
+              onChange={(event) => setQuickText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  addQuickTask()
+                }
+              }}
+            />
+            <button onClick={addQuickTask}>Add</button>
+          </div>
         </div>
       </header>
 
@@ -717,7 +850,7 @@ function App() {
                       value={newProjectName}
                       onChange={(e) => setNewProjectName(e.target.value)}
                       onKeyDown={async (e) => {
-                        if (e.key === 'Enter' && newProjectName.trim()) {
+                        if (e.key === 'Enter' && newProjectName.trim() && user) {
                           const maxOrder = projects.reduce(
                             (max, p) => Math.max(max, p.order),
                             0,
@@ -725,11 +858,16 @@ function App() {
                           await addDoc(collection(db, 'projects'), {
                             name: newProjectName.trim(),
                             state: 'active',
+                            userId: user.uid,
                             order: maxOrder + 10,
                             createdAt: serverTimestamp(),
                           })
                           const projectSnap = await getDocs(
-                            query(collection(db, 'projects'), orderBy('order')),
+                            query(
+                              collection(db, 'projects'),
+                              where('userId', '==', user.uid),
+                              orderBy('order')
+                            ),
                           )
                           const nextProjects = projectSnap.docs.map((docSnap) =>
                             mapProjectDoc(docSnap.id, docSnap.data()),
@@ -743,7 +881,7 @@ function App() {
                     <button
                       className="btn-primary"
                       onClick={async () => {
-                        if (newProjectName.trim()) {
+                        if (newProjectName.trim() && user) {
                           const maxOrder = projects.reduce(
                             (max, p) => Math.max(max, p.order),
                             0,
@@ -751,11 +889,16 @@ function App() {
                           await addDoc(collection(db, 'projects'), {
                             name: newProjectName.trim(),
                             state: 'active',
+                            userId: user.uid,
                             order: maxOrder + 10,
                             createdAt: serverTimestamp(),
                           })
                           const projectSnap = await getDocs(
-                            query(collection(db, 'projects'), orderBy('order')),
+                            query(
+                              collection(db, 'projects'),
+                              where('userId', '==', user.uid),
+                              orderBy('order')
+                            ),
                           )
                           const nextProjects = projectSnap.docs.map((docSnap) =>
                             mapProjectDoc(docSnap.id, docSnap.data()),
@@ -861,7 +1004,7 @@ function App() {
                   </button>
                   <h2>{projectMap.get(selectedProjectId)?.name}</h2>
                   <p>Tree view based on parent tasks.</p>
-                  {selectedProjectId !== 'p-default' && (
+                  {selectedProjectId !== defaultProjectId && (
                     <div style={{ marginTop: '12px' }}>
                       <label style={{ fontSize: '0.9rem', color: '#52606d', marginRight: '8px' }}>
                         Status:
@@ -939,6 +1082,15 @@ function App() {
                         <option value="done">Completed</option>
                       </select>
                     </div>
+                  )}
+                  {selectedProjectId !== defaultProjectId && (
+                    <button
+                      className="btn-delete"
+                      style={{ marginTop: '12px' }}
+                      onClick={() => deleteProject(selectedProjectId)}
+                    >
+                      🗑️ Delete Project
+                    </button>
                   )}
                 </div>
                 <div className="badge">{projectTasks.length} tasks</div>
